@@ -551,7 +551,89 @@ def tab_overview(kpis, gen_stats, entries):
             )
 
 
+def _detail_card(num: int, entry, details_lookup: dict) -> str:
+    """Render a rich HTML detail card for one Pokémon."""
+    d = details_lookup.get(num, {})
+    name     = d.get("name", f"Pokémon #{num}").replace("-", " ").title()
+    type1    = d.get("type1") or ""
+    type2    = d.get("type2") or ""
+    hp       = d.get("hp")   or 0
+    atk      = d.get("attack")    or 0
+    def_     = d.get("defense")   or 0
+    spatk    = d.get("sp_attack") or 0
+    spdef    = d.get("sp_defense")or 0
+    spd      = d.get("speed")     or 0
+    weight   = d.get("weight_hg") or 0
+    height   = d.get("height_dm") or 0
+    is_leg   = d.get("is_legendary", False)
+    is_myth  = d.get("is_mythical",  False)
+    collected = bool(entry and entry.collected)
+
+    status_badge = (
+        '<span style="background:#2E7D32;color:white;padding:2px 8px;border-radius:999px;font-size:11px">✓ Collected</span>'
+        if collected else
+        '<span style="background:#B71C1C;color:white;padding:2px 8px;border-radius:999px;font-size:11px">✗ Missing</span>'
+    )
+    special = ""
+    if is_leg:  special = '<span style="background:#F8D030;color:#5D4037;padding:2px 8px;border-radius:999px;font-size:11px;margin-left:4px">⭐ Legendary</span>'
+    if is_myth: special = '<span style="background:#F85888;color:white;padding:2px 8px;border-radius:999px;font-size:11px;margin-left:4px">✨ Mythical</span>'
+
+    def type_badge(t):
+        if not t: return ""
+        c = TYPE_COLORS.get(t, "#888")
+        return f'<span style="background:{c};color:white;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:700">{t.capitalize()}</span>'
+
+    def stat_bar(label, val, max_val=255):
+        pct   = min(100, val / max_val * 100)
+        color = "#78C850" if pct >= 60 else "#F8D030" if pct >= 35 else "#F08030"
+        return (
+            f'<div style="display:flex;align-items:center;gap:6px;margin:3px 0">'
+            f'<span style="width:52px;font-size:10px;color:#A08060;text-align:right">{label}</span>'
+            f'<div style="flex:1;background:#F3E0CC;border-radius:999px;height:8px;overflow:hidden">'
+            f'<div style="width:{pct:.0f}%;background:{color};height:8px;border-radius:999px"></div></div>'
+            f'<span style="width:28px;font-size:11px;font-weight:700;color:#5D4037">{val}</span>'
+            f'</div>'
+        )
+
+    return (
+        f'<div style="background:#fff;border:1px solid #F3E0CC;border-radius:16px;padding:16px;'
+        f'box-shadow:0 2px 12px rgba(0,0,0,0.07);text-align:center">'
+        f'<div style="font-size:10px;color:#A08060;letter-spacing:1px">#{num:04d}</div>'
+        f'<img src="{sprite_url(num)}" width="110" style="margin:4px auto;display:block">'
+        f'<div style="font-size:16px;font-weight:900;color:#1a1a2a;margin:4px 0">{name}</div>'
+        f'<div style="margin:4px 0">{type_badge(type1)} {type_badge(type2)}</div>'
+        f'<div style="margin:6px 0">{status_badge}{special}</div>'
+        f'<div style="border-top:1px solid #F3E0CC;margin:10px 0 6px;padding-top:8px">'
+        f'{stat_bar("HP", hp)}'
+        f'{stat_bar("Attack", atk)}'
+        f'{stat_bar("Defense", def_)}'
+        f'{stat_bar("Sp.Atk", spatk)}'
+        f'{stat_bar("Sp.Def", spdef)}'
+        f'{stat_bar("Speed", spd)}'
+        f'</div>'
+        f'<div style="font-size:10px;color:#B0A090;margin-top:6px">'
+        f'{height/10:.1f} m &nbsp;·&nbsp; {weight/10:.1f} kg</div>'
+        f'</div>'
+    )
+
+
 def tab_grid(entries, api_total, new_ids):
+    # Load details for tooltips and side panel
+    details_df     = _cached_details()
+    details_lookup = (
+        {int(r["pokemon_number"]): r for r in details_df.to_dict("records")}
+        if not details_df.empty else {}
+    )
+
+    # Build enhanced tile tooltips including name
+    def tile_title(num):
+        d = details_lookup.get(num, {})
+        name = d.get("name", "").replace("-", " ").title()
+        t1   = d.get("type1", "")
+        t2   = d.get("type2", "")
+        types = f"{t1.capitalize()}" + (f"/{t2.capitalize()}" if t2 else "")
+        return f"#{num} {name}" + (f" · {types}" if types else "")
+
     st.markdown(
         '<div class="legend">'
         '<span><span class="legend-dot" style="background:#C8E6C9;border:1px solid #43A047"></span>Collected</span>'
@@ -560,18 +642,43 @@ def tab_grid(entries, api_total, new_ids):
         '</div>',
         unsafe_allow_html=True,
     )
-    c1, c2 = st.columns([2, 1])
-    with c1:
+
+    fc1, fc2 = st.columns([2, 1])
+    with fc1:
         selected_gen = st.selectbox("Filter by Generation", ["All Generations"] + list(GENERATIONS.keys()))
-    with c2:
-        jump = st.number_input("Highlight #", min_value=1, max_value=api_total, value=1, step=1)
+    with fc2:
+        jump = st.number_input("Select / Highlight #", min_value=1, max_value=api_total, value=1, step=1)
 
     g_start, g_end = (1, api_total) if selected_gen == "All Generations" else GENERATIONS[selected_gen]
     g_end = min(g_end, api_total)
     highlight_num = jump if g_start <= jump <= g_end else None
 
-    st.caption(f"Showing #{g_start}–#{g_end} · {g_end - g_start + 1:,} Pokémon")
-    st.markdown(render_grid(entries, g_start, g_end, new_ids, highlight=highlight_num), unsafe_allow_html=True)
+    # Grid left, detail card right
+    grid_col, card_col = st.columns([3, 1])
+
+    with grid_col:
+        st.caption(f"Showing #{g_start}–#{g_end} · {g_end - g_start + 1:,} Pokémon · hover for name & type")
+
+        # Build tiles with richer tooltips
+        tiles = []
+        for num in range(g_start, g_end + 1):
+            entry = entries.get(num)
+            if num in new_ids:
+                cls, lbl = "pt pt-n", "★"
+            elif entry and entry.collected:
+                cls, lbl = "pt pt-c", "✓"
+            else:
+                cls, lbl = "pt pt-m", ""
+            tt = tile_title(num)
+            if num == highlight_num:
+                tiles.append(f'<div class="pt pt-c pt-hi" title="{tt}">{lbl}</div>')
+            else:
+                tiles.append(f'<div class="{cls}" title="{tt}">{lbl}</div>')
+        st.markdown(f'<div class="pdx-grid">{"".join(tiles)}</div>', unsafe_allow_html=True)
+
+    with card_col:
+        entry = entries.get(jump)
+        st.markdown(_detail_card(jump, entry, details_lookup), unsafe_allow_html=True)
 
 
 def tab_missing(gaps, api_total):
@@ -906,7 +1013,8 @@ def tab_analytics(entries: dict) -> None:
     cdf_display["Base Total"] = cdf_display[stat_cols].sum(axis=1)
     cdf_display["Name"] = cdf_display["name"].str.replace("-", " ").str.title()
     cdf_display["Types"] = cdf_display.apply(
-        lambda r: f'{r["type1"].capitalize()}' + (f' / {r["type2"].capitalize()}' if r.get("type2") else ""),
+        lambda r: (r["type1"].capitalize() if isinstance(r.get("type1"), str) else "")
+                  + (f' / {r["type2"].capitalize()}' if isinstance(r.get("type2"), str) and r["type2"] else ""),
         axis=1,
     )
     top10 = (
