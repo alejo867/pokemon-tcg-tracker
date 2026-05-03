@@ -19,7 +19,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.analytics import GENERATIONS, compute_kpis, find_gaps, get_generation_stats
-from src.database import bulk_upsert, fetch_all, upsert
+from src.database import bulk_upsert, fetch_all, load_all_details, upsert
 from src.excel_parser import PokemonEntry, load_collection
 from src.pokeapi import check_new_pokemon, get_authoritative_total, invalidate_total_cache
 from src.state import load_state, save_state
@@ -46,6 +46,16 @@ def mini_sprite_url(dex_num: int) -> str:
         f"https://raw.githubusercontent.com/PokeAPI/sprites/master"
         f"/sprites/pokemon/{dex_num}.png"
     )
+
+# ── Type colors (official Pokémon palette) ────────────────────────────────────
+TYPE_COLORS = {
+    "normal":   "#A8A878", "fire":     "#F08030", "water":    "#6890F0",
+    "electric": "#F8D030", "grass":    "#78C850", "ice":      "#98D8D8",
+    "fighting": "#C03028", "poison":   "#A040A0", "ground":   "#E0C068",
+    "flying":   "#A890F0", "psychic":  "#F85888", "bug":      "#A8B820",
+    "rock":     "#B8A038", "ghost":    "#705898", "dragon":   "#7038F8",
+    "dark":     "#705848", "steel":    "#B8B8D0", "fairy":    "#EE99AC",
+}
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 CSS = """
@@ -378,6 +388,18 @@ def _cached_api_total():
     return get_authoritative_total()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_details() -> pd.DataFrame:
+    rows = load_all_details()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    for col in ["hp","attack","defense","sp_attack","sp_defense","speed","height_dm","weight_hg"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 # ── Render helpers ────────────────────────────────────────────────────────────
 
 def kpi_card(label, value, sub="", variant=""):
@@ -671,6 +693,239 @@ def tab_update(entries, api_total):
     )
 
 
+def tab_analytics(entries: dict) -> None:
+    details_df = _cached_details()
+
+    if details_df.empty:
+        st.info("Pokémon details not loaded yet. Run: `python fetch_pokemon_details.py`")
+        return
+
+    # Merge collection status into details
+    df = details_df.copy()
+    df["collected"] = df["pokemon_number"].apply(
+        lambda n: bool(entries.get(n) and entries[n].collected)
+    )
+    cdf = df[df["collected"]].copy()   # collected subset
+    n   = len(cdf)
+
+    if n == 0:
+        st.info("No collected Pokémon with details yet.")
+        return
+
+    n_leg  = int(cdf["is_legendary"].sum())
+    n_myth = int(cdf["is_mythical"].sum())
+    total_bs = (cdf[["hp","attack","defense","sp_attack","sp_defense","speed"]].sum(axis=1)).mean()
+
+    st.markdown(
+        f'<div style="color:#A08060;font-size:13px;margin-bottom:16px">'
+        f'Analyzing <b style="color:#CC0000">{n}</b> collected Pokémon &nbsp;·&nbsp; '
+        f'<b style="color:#F8D030">{n_leg}</b> Legendary &nbsp;·&nbsp; '
+        f'<b style="color:#F85888">{n_myth}</b> Mythical &nbsp;·&nbsp; '
+        f'Avg Base Stat Total: <b style="color:#6890F0">{total_bs:.0f}</b>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Champion cards ────────────────────────────────────────────────────────
+    st.markdown('<div class="sec-hdr">🏆 Your Champions</div>', unsafe_allow_html=True)
+    champ_defs = [
+        ("⚡ Fastest",      "speed",   "#F8D030"),
+        ("⚔️ Strongest",    "attack",  "#F08030"),
+        ("🛡️ Bulkiest",     "defense", "#6890F0"),
+        ("❤️ Highest HP",   "hp",      "#78C850"),
+        ("🏋️ Heaviest",     "weight_hg","#A8A878"),
+    ]
+    for col, (title, stat, color) in zip(st.columns(5), champ_defs):
+        row = cdf.loc[cdf[stat].idxmax()]
+        num = int(row["pokemon_number"])
+        val = int(row[stat])
+        label = f"{val/10:.1f} kg" if stat == "weight_hg" else str(val)
+        with col:
+            st.markdown(
+                f'<div class="kpi-card" style="border-top:4px solid {color};padding-top:12px">'
+                f'<div class="kpi-label">{title}</div>'
+                f'<img src="{sprite_url(num)}" width="80" style="margin:6px auto 4px;display:block">'
+                f'<div style="font-size:13px;font-weight:800;color:#1a1a2a;margin-top:4px">'
+                f'{row["name"].replace("-"," ").title()}</div>'
+                f'<div style="font-size:10px;color:#A08060">#{num}</div>'
+                f'<div style="font-size:22px;font-weight:900;color:{color};margin-top:6px">{label}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Type distribution + Legendary donut ──────────────────────────────────
+    st.markdown('<div class="sec-hdr">🎨 Type Breakdown</div>', unsafe_allow_html=True)
+    tc1, tc2 = st.columns([3, 2])
+
+    with tc1:
+        type_counts: dict = {}
+        for _, row in cdf.iterrows():
+            for t in [row.get("type1"), row.get("type2")]:
+                if t and isinstance(t, str):
+                    type_counts[t] = type_counts.get(t, 0) + 1
+
+        type_series = (
+            pd.DataFrame(list(type_counts.items()), columns=["type", "count"])
+            .sort_values("count", ascending=True)
+        )
+        bar_colors = [TYPE_COLORS.get(t, "#888") for t in type_series["type"]]
+
+        fig_types = go.Figure(go.Bar(
+            y=type_series["type"].str.capitalize(),
+            x=type_series["count"],
+            orientation="h",
+            marker=dict(color=bar_colors, line=dict(width=0)),
+            text=type_series["count"],
+            textposition="outside",
+            hovertemplate="%{y}: %{x} Pokémon<extra></extra>",
+        ))
+        fig_types.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            height=440, margin=dict(l=10, r=40, t=10, b=10),
+            xaxis=dict(showgrid=True, gridcolor="#F3E0CC", zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, tickfont=dict(size=12, color="#5D4037")),
+            font=dict(family="sans-serif"),
+        )
+        st.plotly_chart(fig_types, use_container_width=True, config={"displayModeBar": False})
+
+    with tc2:
+        fig_leg = go.Figure(go.Pie(
+            labels=["Regular", "Legendary", "Mythical"],
+            values=[n - n_leg - n_myth, n_leg, n_myth],
+            hole=0.55,
+            marker=dict(colors=["#78C850", "#F8D030", "#F85888"], line=dict(width=0)),
+            textinfo="label+percent",
+            hovertemplate="%{label}: %{value}<extra></extra>",
+        ))
+        fig_leg.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", height=260,
+            margin=dict(l=0, r=0, t=10, b=0),
+            showlegend=False, font=dict(family="sans-serif"),
+        )
+        st.plotly_chart(fig_leg, use_container_width=True, config={"displayModeBar": False})
+
+        # Type badge list (rarest in your collection)
+        st.markdown("**Rarest types you own:**")
+        for _, row in type_series.head(6).iterrows():
+            color = TYPE_COLORS.get(row["type"], "#888")
+            st.markdown(
+                f'<span style="background:{color};color:white;padding:2px 10px;'
+                f'border-radius:999px;font-size:12px;font-weight:700;display:inline-block;margin:2px">'
+                f'{row["type"].capitalize()}</span> &nbsp;{int(row["count"])}',
+                unsafe_allow_html=True,
+            )
+
+    # ── Attack vs Defense scatter ─────────────────────────────────────────────
+    st.markdown('<div class="sec-hdr">⚔️ Attack vs Defense — Your Collection</div>', unsafe_allow_html=True)
+
+    fig_scatter = go.Figure()
+
+    # Gray background: missing Pokémon
+    mdf = df[~df["collected"]].dropna(subset=["attack","defense"])
+    fig_scatter.add_trace(go.Scatter(
+        x=mdf["attack"], y=mdf["defense"],
+        mode="markers",
+        name="Not collected",
+        marker=dict(color="#E8E0D8", size=4, line=dict(width=0)),
+        hovertemplate="#%{customdata[0]} %{customdata[1]}<extra></extra>",
+        customdata=mdf[["pokemon_number","name"]].values,
+    ))
+
+    # Collected: one trace per type, colored
+    for type_name, grp in cdf.dropna(subset=["attack","defense","type1"]).groupby("type1"):
+        color = TYPE_COLORS.get(type_name, "#888")
+        grp = grp.dropna(subset=["hp"])
+        fig_scatter.add_trace(go.Scatter(
+            x=grp["attack"], y=grp["defense"],
+            mode="markers",
+            name=type_name.capitalize(),
+            marker=dict(
+                color=color, opacity=0.85,
+                size=grp["hp"].apply(lambda v: 5 + v / 18),
+                line=dict(width=0.5, color="white"),
+            ),
+            hovertemplate=(
+                "<b>#%{customdata[0]} %{customdata[1]}</b><br>"
+                "Attack: %{x} &nbsp; Defense: %{y}<br>"
+                "HP: %{customdata[2]}<extra></extra>"
+            ),
+            customdata=grp[["pokemon_number","name","hp"]].values,
+        ))
+
+    fig_scatter.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#FAFAF7",
+        height=460, margin=dict(l=20, r=20, t=10, b=60),
+        xaxis=dict(title="Attack", showgrid=True, gridcolor="#F3E0CC", zeroline=False),
+        yaxis=dict(title="Defense", showgrid=True, gridcolor="#F3E0CC", zeroline=False),
+        legend=dict(orientation="h", y=-0.18, x=0.5, xanchor="center", font=dict(size=11)),
+        font=dict(family="sans-serif"),
+        hoverlabel=dict(bgcolor="white", bordercolor="#F3E0CC"),
+    )
+    st.caption("Bubble size = HP. Gray = not yet collected.")
+    st.plotly_chart(fig_scatter, use_container_width=True, config={"displayModeBar": False})
+
+    # ── Your avg stats vs all Pokémon ─────────────────────────────────────────
+    st.markdown('<div class="sec-hdr">📊 Your Collection vs All Pokémon — Average Stats</div>', unsafe_allow_html=True)
+
+    stat_labels = ["HP", "Attack", "Defense", "Sp. Attack", "Sp. Defense", "Speed"]
+    stat_cols   = ["hp", "attack", "defense", "sp_attack", "sp_defense", "speed"]
+
+    your_avgs = [cdf[c].mean() for c in stat_cols]
+    all_avgs  = [df[c].mean()  for c in stat_cols]
+
+    fig_stats = go.Figure()
+    fig_stats.add_trace(go.Bar(
+        name="Your Collection", x=stat_labels, y=your_avgs,
+        marker=dict(color="#CC0000", line=dict(width=0)),
+        text=[f"{v:.0f}" for v in your_avgs], textposition="outside",
+        hovertemplate="%{x}: %{y:.1f}<extra></extra>",
+    ))
+    fig_stats.add_trace(go.Bar(
+        name="All 1025 Pokémon", x=stat_labels, y=all_avgs,
+        marker=dict(color="#A8A878", opacity=0.75, line=dict(width=0)),
+        text=[f"{v:.0f}" for v in all_avgs], textposition="outside",
+        hovertemplate="%{x}: %{y:.1f}<extra></extra>",
+    ))
+    fig_stats.update_layout(
+        barmode="group",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        height=360, margin=dict(l=20, r=20, t=20, b=20),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(showgrid=True, gridcolor="#F3E0CC", zeroline=False, range=[0, max(max(your_avgs), max(all_avgs)) * 1.2]),
+        legend=dict(orientation="h", y=-0.12, x=0.5, xanchor="center"),
+        font=dict(family="sans-serif"),
+        hoverlabel=dict(bgcolor="white"),
+    )
+    st.plotly_chart(fig_stats, use_container_width=True, config={"displayModeBar": False})
+
+    # ── Stat leaders table ────────────────────────────────────────────────────
+    st.markdown('<div class="sec-hdr">🥇 Your Top 10 by Base Stat Total</div>', unsafe_allow_html=True)
+    cdf_display = cdf.copy()
+    cdf_display["Base Total"] = cdf_display[stat_cols].sum(axis=1)
+    cdf_display["Name"] = cdf_display["name"].str.replace("-", " ").str.title()
+    cdf_display["Types"] = cdf_display.apply(
+        lambda r: f'{r["type1"].capitalize()}' + (f' / {r["type2"].capitalize()}' if r.get("type2") else ""),
+        axis=1,
+    )
+    top10 = (
+        cdf_display[["pokemon_number","Name","Types","hp","attack","defense","sp_attack","sp_defense","speed","Base Total","is_legendary","is_mythical"]]
+        .sort_values("Base Total", ascending=False)
+        .head(10)
+        .rename(columns={"pokemon_number":"#","hp":"HP","attack":"ATK","defense":"DEF",
+                          "sp_attack":"SpATK","sp_defense":"SpDEF","speed":"SPD"})
+    )
+    top10["#"] = top10["#"].astype(int)
+    top10["Leg."] = top10.apply(
+        lambda r: "⭐ Legendary" if r["is_legendary"] else ("✨ Mythical" if r["is_mythical"] else ""), axis=1
+    )
+    st.dataframe(
+        top10[["#","Name","Types","HP","ATK","DEF","SpATK","SpDEF","SPD","Base Total","Leg."]],
+        use_container_width=True, hide_index=True,
+    )
+
+
 def tab_duplicates(entries):
     st.markdown(
         '<div class="phase2-notice">🔧 <strong>Phase 2</strong> — '
@@ -810,14 +1065,15 @@ def main():
         )
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    t1, t2, t3, t4, t5 = st.tabs(
-        ["📊 Overview", "🔲 Pokédex Grid", "❌ Missing", "✏️ Update", "🔄 Duplicates"]
+    t1, t2, t3, t4, t5, t6 = st.tabs(
+        ["📊 Overview", "🔲 Pokédex Grid", "❌ Missing", "🔬 Analytics", "✏️ Update", "🔄 Duplicates"]
     )
     with t1: tab_overview(kpis, gen_stats, entries)
     with t2: tab_grid(entries, api_total, new_ids)
     with t3: tab_missing(kpis["gaps"], api_total)
-    with t4: tab_update(entries, api_total)
-    with t5: tab_duplicates(entries)
+    with t4: tab_analytics(entries)
+    with t5: tab_update(entries, api_total)
+    with t6: tab_duplicates(entries)
 
 
 if __name__ == "__main__":

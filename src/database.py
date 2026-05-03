@@ -37,6 +37,18 @@ def upsert(number: int, quantity: int, quantity2: int = 0) -> None:
     ).execute()
 
 
+def load_all_details() -> List[dict]:
+    """Return all rows from pokemon_details, ordered by number."""
+    resp = (
+        _client()
+        .table("pokemon_details")
+        .select("*")
+        .order("pokemon_number")
+        .execute()
+    )
+    return resp.data or []
+
+
 def bulk_upsert(rows: List[dict]) -> None:
     """
     Upsert many rows at once.
