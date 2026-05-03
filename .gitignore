@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Cache & state (auto-generated, keep .gitkeep files)
+cache/*.json
+
+# Excel (sensitive personal data — don't commit)
+data/*.xlsx
+data/*.xls
+
+# Streamlit
+.streamlit/secrets.toml
+
+# macOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
