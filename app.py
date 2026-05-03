@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -618,21 +619,11 @@ def _detail_card(num: int, entry, details_lookup: dict) -> str:
 
 
 def tab_grid(entries, api_total, new_ids):
-    # Load details for tooltips and side panel
     details_df     = _cached_details()
     details_lookup = (
         {int(r["pokemon_number"]): r for r in details_df.to_dict("records")}
         if not details_df.empty else {}
     )
-
-    # Build enhanced tile tooltips including name
-    def tile_title(num):
-        d = details_lookup.get(num, {})
-        name = d.get("name", "").replace("-", " ").title()
-        t1   = d.get("type1", "")
-        t2   = d.get("type2", "")
-        types = f"{t1.capitalize()}" + (f"/{t2.capitalize()}" if t2 else "")
-        return f"#{num} {name}" + (f" · {types}" if types else "")
 
     st.markdown(
         '<div class="legend">'
@@ -652,29 +643,117 @@ def tab_grid(entries, api_total, new_ids):
     g_start, g_end = (1, api_total) if selected_gen == "All Generations" else GENERATIONS[selected_gen]
     g_end = min(g_end, api_total)
     highlight_num = jump if g_start <= jump <= g_end else None
+    n_tiles = g_end - g_start + 1
 
-    # Grid left, detail card right
     grid_col, card_col = st.columns([3, 1])
 
     with grid_col:
-        st.caption(f"Showing #{g_start}–#{g_end} · {g_end - g_start + 1:,} Pokémon · hover for name & type")
+        st.caption(f"Showing #{g_start}–#{g_end} · {n_tiles:,} Pokémon · hover any tile for details")
 
-        # Build tiles with richer tooltips
-        tiles = []
+        tile_parts = []
         for num in range(g_start, g_end + 1):
             entry = entries.get(num)
+            d = details_lookup.get(num, {})
+            name = d.get("name", f"#{num}").replace("-", " ").title()
+            t1 = d.get("type1", "") or ""
+            t2 = d.get("type2", "") or ""
+            is_collected = bool(entry and entry.collected)
+            is_leg  = bool(d.get("is_legendary"))
+            is_myth = bool(d.get("is_mythical"))
+
             if num in new_ids:
                 cls, lbl = "pt pt-n", "★"
-            elif entry and entry.collected:
+            elif is_collected:
                 cls, lbl = "pt pt-c", "✓"
             else:
                 cls, lbl = "pt pt-m", ""
-            tt = tile_title(num)
             if num == highlight_num:
-                tiles.append(f'<div class="pt pt-c pt-hi" title="{tt}">{lbl}</div>')
-            else:
-                tiles.append(f'<div class="{cls}" title="{tt}">{lbl}</div>')
-        st.markdown(f'<div class="pdx-grid">{"".join(tiles)}</div>', unsafe_allow_html=True)
+                cls += " pt-hi"
+
+            safe_name = name.replace("'", "&#39;").replace('"', "&quot;")
+            tile_parts.append(
+                f'<div class="{cls}"'
+                f' data-num="{num}" data-name="{safe_name}"'
+                f' data-t1="{t1}" data-t2="{t2}"'
+                f' data-col="{str(is_collected).lower()}"'
+                f' data-leg="{str(is_leg).lower()}"'
+                f' data-myth="{str(is_myth).lower()}">'
+                f'{lbl}</div>'
+            )
+
+        grid_html = f'<div class="pdx-grid">{"".join(tile_parts)}</div>'
+
+        # Estimate height so iframe fits snugly (18 tiles/row approximation)
+        n_rows = (n_tiles + 17) // 18
+        comp_height = min(560, n_rows * 32 + 36)
+
+        component_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:transparent;font-family:sans-serif;overflow-x:hidden}}
+.pdx-grid{{display:flex;flex-wrap:wrap;gap:3px;padding:12px;background:#FFF8F2;border-radius:12px;border:1px solid #F3E0CC}}
+.pt{{width:27px;height:27px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:7px;cursor:default;transition:transform .1s;user-select:none}}
+.pt:hover{{transform:scale(1.5);z-index:20}}
+.pt-c{{background:#C8E6C9;border:1px solid #43A047;color:#1B5E20;font-weight:700}}
+.pt-m{{background:#F5F5F5;border:1px solid #DDD;color:#BBB}}
+.pt-n{{background:#E1BEE7;border:1px solid #8E24AA;color:#4A148C}}
+.pt-hi{{outline:3px solid #FF6F00!important;transform:scale(1.6)!important;z-index:30}}
+#tip{{display:none;position:fixed;background:#fff;border:1px solid #F3E0CC;border-radius:12px;padding:12px 10px 10px;box-shadow:0 4px 20px rgba(0,0,0,.2);z-index:9999;width:148px;text-align:center;pointer-events:none}}
+.t-num{{font-size:9px;color:#A08060;letter-spacing:1px;margin-bottom:2px}}
+.t-spr{{display:block;margin:0 auto 4px;image-rendering:pixelated}}
+.t-name{{font-size:13px;font-weight:900;color:#1a1a2a;margin:3px 0 5px}}
+.t-types{{display:flex;gap:4px;justify-content:center;flex-wrap:wrap;margin-bottom:5px}}
+.tb{{padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700;color:#fff}}
+.t-info{{font-size:10px;font-weight:700;margin-top:2px}}
+</style></head><body>
+{grid_html}
+<div id="tip">
+  <div class="t-num"  id="t-num"></div>
+  <img class="t-spr"  id="t-spr" width="56" height="56" src="" alt="">
+  <div class="t-name" id="t-name"></div>
+  <div class="t-types" id="t-types"></div>
+  <div class="t-info" id="t-stat"></div>
+  <div class="t-info" id="t-spec"></div>
+</div>
+<script>
+const TC={{normal:'#A8A878',fire:'#F08030',water:'#6890F0',electric:'#F8D030',grass:'#78C850',ice:'#98D8D8',fighting:'#C03028',poison:'#A040A0',ground:'#E0C068',flying:'#A890F0',psychic:'#F85888',bug:'#A8B820',rock:'#B8A038',ghost:'#705898',dragon:'#7038F8',dark:'#705848',steel:'#B8B8D0',fairy:'#EE99AC'}};
+const SPR='https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/';
+const tip=document.getElementById('tip');
+let mx=0,my=0;
+document.addEventListener('mousemove',e=>{{mx=e.clientX;my=e.clientY;if(tip.style.display!=='none')pos();}});
+function pos(){{
+  const tw=tip.offsetWidth,th=tip.offsetHeight,vw=window.innerWidth,vh=window.innerHeight;
+  let x=mx+14,y=my-th-10;
+  if(x+tw>vw-8)x=mx-tw-14;
+  if(y<8)y=my+16;
+  tip.style.left=x+'px';tip.style.top=y+'px';
+}}
+document.querySelectorAll('.pt').forEach(t=>{{
+  t.addEventListener('mouseenter',()=>{{
+    const d=t.dataset;
+    document.getElementById('t-num').textContent='#'+d.num.padStart(4,'0');
+    document.getElementById('t-spr').src=SPR+d.num+'.png';
+    document.getElementById('t-name').textContent=d.name;
+    const tp=document.getElementById('t-types');tp.innerHTML='';
+    [d.t1,d.t2].filter(Boolean).forEach(ty=>{{
+      const s=document.createElement('span');s.className='tb';
+      s.textContent=ty.charAt(0).toUpperCase()+ty.slice(1);
+      s.style.background=TC[ty]||'#888';tp.appendChild(s);
+    }});
+    document.getElementById('t-stat').innerHTML=d.col==='true'
+      ?'<span style="color:#2E7D32">✓ Collected</span>'
+      :'<span style="color:#B71C1C">✗ Missing</span>';
+    const sp=document.getElementById('t-spec');
+    sp.innerHTML=d.leg==='true'?'<span style="color:#F8A000">⭐ Legendary</span>'
+      :d.myth==='true'?'<span style="color:#F85888">✨ Mythical</span>':'';
+    tip.style.display='block';pos();
+  }});
+  t.addEventListener('mouseleave',()=>tip.style.display='none');
+}});
+</script>
+</body></html>"""
+
+        components.html(component_html, height=comp_height, scrolling=True)
 
     with card_col:
         entry = entries.get(jump)
